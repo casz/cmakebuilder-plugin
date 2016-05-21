@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nonnull;
 import javax.servlet.ServletException;
 
 import org.kohsuke.stapler.AncestorInPath;
@@ -18,10 +19,16 @@ import hudson.Launcher;
 import hudson.Util;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
+import hudson.model.Computer;
 import hudson.model.Environment;
+import hudson.model.Job;
+import hudson.model.Node;
+import hudson.model.Result;
+import hudson.model.Run;
+import hudson.model.TaskListener;
 import hudson.util.ArgumentListBuilder;
 import hudson.util.FormValidation;
+import jenkins.tasks.SimpleBuildStep;
 
 /**
  * Executes <tt>cmake</tt> as a build step.
@@ -29,7 +36,8 @@ import hudson.util.FormValidation;
  * @author Volker Kaiser (initial implementation)
  * @author Martin Weber
  */
-public class CmakeBuilder extends AbstractCmakeBuilder {
+public class CmakeBuilder extends AbstractCmakeBuilder
+        implements SimpleBuildStep {
 
     /**
      * the key for the build variable that holds the build tool that the
@@ -48,7 +56,7 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
     private String preloadScript;
     private boolean cleanBuild;
 
-    // for backward compatibility with < 2.4.9
+    // for backward compatibility with < 2.4.0
     // see
     // https://wiki.jenkins-ci.org/display/JENKINS/Hint+on+retaining+backward+compatibility
     private transient String buildDir;
@@ -195,23 +203,45 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
         return toolSteps;
     }
 
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher,
-            BuildListener listener) throws InterruptedException, IOException {
+    public void perform(@Nonnull Run<?, ?> run, @Nonnull FilePath workSpace,
+            @Nonnull Launcher launcher, @Nonnull TaskListener listener)
+            throws InterruptedException, IOException {
+
         CmakeTool installToUse = getSelectedInstallation();
         // Raise an error if the cmake installation isn't found
         if (installToUse == null) {
             listener.fatalError("There is no CMake installation selected."
                     + " Please review the build step configuration.");
-            return false;
+            run.setResult(Result.FAILURE);
+            return;
         }
-        final EnvVars envs = build.getEnvironment(listener);
-        envs.overrideAll(build.getBuildVariables());
-
-        // Get the CMake version for this node, installing it if necessary
-        installToUse = (CmakeTool) installToUse.translate(build, listener);
-
+        {
+            final Computer compi = workSpace.toComputer();
+            if (compi == null) {
+                listener.fatalError("Workspace %1s does not exist.",
+                        workSpace.getRemote());
+                run.setResult(Result.FAILURE);
+                return;
+            }
+            final Node node = compi.getNode();
+            if (node == null) {
+                listener.fatalError("Node for workspace %1s does not exist.",
+                        workSpace.getRemote());
+                run.setResult(Result.FAILURE);
+                return;
+            }
+            // Get the CMake version for this node, installing it if necessary
+            installToUse = (CmakeTool) installToUse.translate(node,
+                    EnvVars.getRemote(compi.getChannel()), listener);
+        }
         final String cmakeBin = installToUse.getCmakeExe();
-        final FilePath workSpace = build.getWorkspace();
+
+        final EnvVars envs = run.getEnvironment(listener);
+        if (run instanceof AbstractBuild) {
+            // NOT running as a pipeline step, expand variables.
+            // (Take any value literally, if in pipeline step.)
+            envs.overrideAll(((AbstractBuild<?, ?>) run).getBuildVariables());
+        }
         try {
             /*
              * Determine remote build directory path. Clean it, if requested.
@@ -219,7 +249,7 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
              */
             final String buildDir = getWorkingDir();
             FilePath theBuildDir = makeRemotePath(workSpace,
-                    Util.replaceMacro(buildDir, envs));
+                    envs.expand(buildDir));
             if (buildDir != null) {
                 if (this.cleanBuild && !buildDir.equals(sourceDir)) {
                     // avoid deleting source dir
@@ -232,16 +262,16 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
 
             /* Invoke cmake in build dir */
             FilePath theSourceDir = makeRemotePath(workSpace,
-                    Util.replaceMacro(sourceDir, envs));
+                    envs.expand(sourceDir));
             ArgumentListBuilder cmakeCall = buildCMakeCall(cmakeBin,
-                    Util.replaceMacro(getGenerator(), envs),
-                    Util.replaceMacro(this.preloadScript, envs), theSourceDir,
-                    Util.replaceMacro(this.buildType, envs),
-                    Util.replaceMacro(getCmakeArgs(), envs));
+                    envs.expand(getGenerator()),
+                    envs.expand(this.preloadScript), theSourceDir,
+                    envs.expand(this.buildType), envs.expand(getCmakeArgs()));
             // invoke cmake
             if (0 != launcher.launch().pwd(theBuildDir).envs(envs)
                     .stdout(listener).cmds(cmakeCall).join()) {
-                return false; // invocation failed
+                run.setResult(Result.FAILURE);
+                return;
             }
 
             /* parse CMakeCache.txt to get the actual build tool */
@@ -255,13 +285,16 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
             } else {
                 // add CMAKE_BUILD_TOOL variable for toolSteps
                 envs.put(CmakeBuilder.ENV_VAR_NAME_CMAKE_BUILD_TOOL, buildTool);
-                // add CMAKE_BUILD_TOOL to env for other build-steps
-                EnvVars exportedEnvVars = new EnvVars();
-                exportedEnvVars.put(CmakeBuilder.ENV_VAR_NAME_CMAKE_BUILD_TOOL,
-                        buildTool);
-                // export environment
-                build.getEnvironments()
-                        .add(Environment.create(exportedEnvVars));
+                if (run instanceof AbstractBuild) {
+                    // add CMAKE_BUILD_TOOL to env for other build-steps
+                    EnvVars exportedEnvVars = new EnvVars();
+                    exportedEnvVars.put(
+                            CmakeBuilder.ENV_VAR_NAME_CMAKE_BUILD_TOOL,
+                            buildTool);
+                    // export environment
+                    ((AbstractBuild<?, ?>) run).getEnvironments()
+                            .add(Environment.create(exportedEnvVars));
+                }
             }
 
             /* invoke each build tool step in build dir */
@@ -271,9 +304,8 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
                     // invoke directly
                     // if buildTool == null, let the unexpanded macro show up in
                     // the log
-                    final String buildToolMacro = Util.replaceMacro("${"
-                            + CmakeBuilder.ENV_VAR_NAME_CMAKE_BUILD_TOOL + "}",
-                            envs);
+                    final String buildToolMacro = envs.expand("${"
+                            + CmakeBuilder.ENV_VAR_NAME_CMAKE_BUILD_TOOL + "}");
                     toolCall = buildBuildToolCall(buildToolMacro,
                             step.getCommandArguments(envs));
                 } else {
@@ -285,15 +317,16 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
                         .overrideAll(step.getEnvironmentVars(envs, listener));
                 if (0 != launcher.launch().pwd(theBuildDir).envs(stepEnv)
                         .stdout(listener).cmds(toolCall).join()) {
-                    return false; // invocation failed
+                    run.setResult(Result.FAILURE);
+                    return;
                 }
             }
         } catch (IOException e) {
             Util.displayIOException(e, listener);
             listener.error(e.getLocalizedMessage());
-            return false;
+            run.setResult(Result.FAILURE);
+            return;
         }
-        return true;
     }
 
     /**
@@ -431,10 +464,12 @@ public class CmakeBuilder extends AbstractCmakeBuilder {
          * @param value
          */
         public FormValidation doCheckSourceDir(
-                @AncestorInPath AbstractProject<?, ?> project,
+                @AncestorInPath Job<?, ?> project,
                 @QueryParameter final String value)
                 throws IOException, ServletException {
-            FilePath ws = project.getSomeWorkspace();
+            FilePath ws = project instanceof AbstractProject<?, ?>
+                    ? ((AbstractProject<?, ?>) project).getSomeWorkspace()
+                    : null;
             if (ws == null)
                 return FormValidation.ok();
             return ws.validateRelativePath(value, false, false);

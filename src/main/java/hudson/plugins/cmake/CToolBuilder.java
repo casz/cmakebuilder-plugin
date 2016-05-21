@@ -2,6 +2,8 @@ package hudson.plugins.cmake;
 
 import java.io.IOException;
 
+import javax.annotation.Nonnull;
+
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 
@@ -11,10 +13,15 @@ import hudson.FilePath;
 import hudson.Launcher;
 import hudson.Util;
 import hudson.model.AbstractBuild;
-import hudson.model.BuildListener;
+import hudson.model.Computer;
 import hudson.model.ModelObject;
+import hudson.model.Node;
+import hudson.model.Result;
+import hudson.model.Run;
+import hudson.model.TaskListener;
 import hudson.util.ArgumentListBuilder;
 import hudson.util.ListBoxModel;
+import jenkins.tasks.SimpleBuildStep;
 
 /**
  * Provides a build step that allows to invoke selected tools of the cmake-suite
@@ -22,7 +29,8 @@ import hudson.util.ListBoxModel;
  * 
  * @author Martin Weber
  */
-public class CToolBuilder extends AbstractCmakeBuilder {
+public class CToolBuilder extends AbstractCmakeBuilder
+        implements SimpleBuildStep {
     /** the ID of the tool in the CMake-suite to invoke {@link Tool}. */
     private String toolId;
 
@@ -74,23 +82,46 @@ public class CToolBuilder extends AbstractCmakeBuilder {
         return super.getArguments();
     }
 
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher,
-            BuildListener listener) throws InterruptedException, IOException {
+    public void perform(@Nonnull Run<?, ?> run, @Nonnull FilePath workSpace,
+            @Nonnull Launcher launcher, @Nonnull TaskListener listener)
+            throws InterruptedException, IOException {
 
         CmakeTool installToUse = getSelectedInstallation();
         // Raise an error if the cmake installation isn't found
         if (installToUse == null) {
             listener.fatalError("There is no CMake installation selected."
                     + " Please review the build step configuration.");
-            return false;
+            run.setResult(Result.FAILURE);
+            return;
         }
-        final EnvVars envs = build.getEnvironment(listener);
-        envs.overrideAll(build.getBuildVariables());
-
-        // Get the CMake version for this node, installing it if necessary
-        installToUse = (CmakeTool) installToUse.translate(build, listener);
-
+        {
+            final Computer compi = workSpace.toComputer();
+            if (compi == null) {
+                listener.fatalError("Workspace %1s does not exist.",
+                        workSpace.getRemote());
+                run.setResult(Result.FAILURE);
+                return;
+            }
+            final Node node = compi.getNode();
+            if (node == null) {
+                listener.fatalError("Node for workspace %1s does not exist.",
+                        workSpace.getRemote());
+                run.setResult(Result.FAILURE);
+                return;
+            }
+            // Get the CMake version for this node, installing it if necessary
+            installToUse = (CmakeTool) installToUse.translate(node,
+                    EnvVars.getRemote(compi.getChannel()), listener);
+        }
         final String cmakeBin = installToUse.getCmakeExe();
+
+        final EnvVars envs = run.getEnvironment(listener);
+        if (run instanceof AbstractBuild) {
+            // NOT running as a pipeline step, expand variables.
+            // (Take any value literally, if in pipeline step.)
+            envs.overrideAll(((AbstractBuild<?, ?>) run).getBuildVariables());
+        }
+
         // strip off the last path segment (usually 'cmake')
         String bindir;
         {
@@ -111,27 +142,27 @@ public class CToolBuilder extends AbstractCmakeBuilder {
 
         try {
             /* Determine remote working directory path. Create it. */
-            final FilePath workSpace = build.getWorkspace();
             final String workDir = getWorkingDir();
             final FilePath theWorkDir = makeRemotePath(workSpace,
-                    Util.replaceMacro(workDir, envs));
+                    envs.expand(workDir));
             if (workDir != null) {
                 theWorkDir.mkdirs();
             }
 
             /* Invoke tool in working dir */
             ArgumentListBuilder cmakeCall = buildToolCall(bindir + getToolId(),
-                    Util.replaceMacro(getArguments(), envs));
+                    envs.expand(getArguments()));
             if (0 != launcher.launch().pwd(theWorkDir).envs(envs)
                     .stdout(listener).cmds(cmakeCall).join()) {
-                return false; // invocation failed
+                run.setResult(Result.FAILURE);
+                return; // invocation failed
             }
         } catch (IOException e) {
             Util.displayIOException(e, listener);
             listener.error(e.getLocalizedMessage());
-            return false;
+            run.setResult(Result.FAILURE);
+            return;
         }
-        return true;
     }
 
     /**
