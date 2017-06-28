@@ -14,7 +14,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Logger;
 
 import org.apache.tools.ant.DirectoryScanner;
 import org.apache.tools.ant.types.FileSet;
@@ -42,8 +41,8 @@ import net.sf.json.JSONObject;
  * Automatic Cmake installer from cmake.org.
  */
 public class CmakeInstaller extends DownloadFromUrlInstaller {
-    private static Logger logger = Logger
-            .getLogger(CmakeInstaller.class.getName());
+//    private static Logger logger = Logger
+//            .getLogger(CmakeInstaller.class.getName());
 
     @DataBoundConstructor
     public CmakeInstaller(String id) {
@@ -147,7 +146,7 @@ public class CmakeInstaller extends DownloadFromUrlInstaller {
     /**
      * Fixes the value returned by {@link ToolInstaller#preferredLocation} to
      * use the <strong>installer ID</strong> instead of the ToolInstallation
-     * {@link ToolInstallation#getName name}. This fix avoids unneccessary
+     * {@link ToolInstallation#getName name}. This fix avoids unnecessary
      * downloads when users change the name of the tool on the global config
      * page.
      *
@@ -248,7 +247,7 @@ public class CmakeInstaller extends DownloadFromUrlInstaller {
                             + "No candidate for cmake executable";
                     throw new AbortException(msg);
                 }
-                // detemine top directory
+                // determine top directory
                 String topDir = new File(cmakeBinFiles[0]).getParent();
                 if (topDir != null) {
                     topDir = new File(topDir).getParent();
@@ -386,7 +385,7 @@ public class CmakeInstaller extends DownloadFromUrlInstaller {
     } // OsFamily
 
     // //////////////////////////////////////////////////////////////////
-    // JSON desrialization
+    // JSON de-serialization
     // //////////////////////////////////////////////////////////////////
     /**
      * Represents the de-serialized JSON data file containing all installable
@@ -397,11 +396,11 @@ public class CmakeInstaller extends DownloadFromUrlInstaller {
     public static final class CmakeInstallableList {
         // initialize with an empty array just in case JSON doesn't have the
         // list field (which shouldn't happen.)
-        // Public for JSON deserialisation
+        // Public for JSON de-serialization
         public CmakeInstallable[] list = new CmakeInstallable[0];
     } // CmakeInstallableList
 
-    // Needs to be public for JSON deserialisation
+    // Needs to be public for JSON de-serialization
     @Restricted(NoExternalUse.class)
     public static class CmakeVariant {
         public String url;
@@ -467,7 +466,7 @@ public class CmakeInstaller extends DownloadFromUrlInstaller {
         }
     }
 
-    // Needs to be public for JSON deserialisation
+    // Needs to be public for JSON de-serialization
     @Restricted(NoExternalUse.class)
     public static class CmakeInstallable extends Installable {
         public CmakeVariant[] variants = new CmakeVariant[0];

@@ -104,7 +104,6 @@ public class CmakeTool extends ToolInstallation implements
     /**
      * Creates a default tool installation if needed. Uses "cmake" or migrates
      * data from previous versions
-     *
      */
     @Initializer(after = EXTENSIONS_AUGMENTED)
     public static void onLoaded() {
